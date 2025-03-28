@@ -159,4 +159,8 @@ streamlit run app.py
 
 ---
 
+<<<<<<< HEAD
 Made with ❤️ by @josefdc @Esteban8482
+=======
+Made with ❤️ by @josefdc    Esteban8482
+>>>>>>> 3877440 (Add initial test suite with placeholder tests and pytest configuration)
