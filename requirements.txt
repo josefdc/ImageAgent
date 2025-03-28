@@ -1,0 +1,16 @@
+# Core dependencies
+pillow>=9.5.0,<10.0.0
+numpy>=1.24.0,<2.0.0
+matplotlib>=3.7.0,<4.0.0
+opencv-python>=4.7.0.0,<5.0.0.0
+
+# Development dependencies
+pytest>=7.3.1,<8.0.0
+pytest-cov>=4.1.0,<5.0.0
+black>=23.3.0,<24.0.0
+flake8>=6.0.0,<7.0.0
+isort>=5.12.0,<6.0.0
+
+# Optional dependencies
+requests>=2.30.0,<3.0.0
+tqdm>=4.65.0,<5.0.0
