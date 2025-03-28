@@ -159,4 +159,4 @@ streamlit run app.py
 
 ---
 
-Made with ❤️ by @josefdc Esteban8482
+Made with ❤️ by @josefdc @Esteban8482
