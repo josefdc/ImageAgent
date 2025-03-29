@@ -1,4 +1,4 @@
-# streamlit_image_editor/core/image_io.py
+# image_editor/core/image_io.py
 import streamlit as st
 from PIL import Image
 import io

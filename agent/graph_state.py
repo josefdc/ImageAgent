@@ -1,4 +1,4 @@
-# streamlit_image_editor/agent/graph_state.py
+# agent/graph_state.py
 # Defines the state structure for the LangGraph agent.
 
 from typing import List, Optional, Tuple, Dict, Any, Annotated
