@@ -1,4 +1,4 @@
-# agent/graph_state.py
+# streamlit_image_editor/agent/graph_state.py
 # Defines the state structure for the LangGraph agent.
 
 from typing import List, Optional, Tuple, Dict, Any, Annotated
@@ -16,8 +16,12 @@ class ToolInvocationRequest(TypedDict, total=False):
 # Main state for the graph
 class AgentState(TypedDict):
     """The overall state of the agent conversation and pending actions."""
-    # Use Annotated with add_messages reducer for proper chat history management.
-    # This ensures ToolMessages are added correctly after AIMessages with tool_calls.
+    # Chat history managed by LangGraph's add_messages reducer
     messages: Annotated[List[BaseMessage], add_messages]
-    # Store the pending tool request separately to avoid interfering with message history reducer
-    tool_invocation_request: Optional[ToolInvocationRequest]  # Contains only name, args, id
+
+    # Pending tool request details (cleared after execution attempt)
+    tool_invocation_request: Optional[ToolInvocationRequest]
+
+    # --- NUEVO: Actualizaciones de UI pendientes ---
+    # Diccionario para almacenar {widget_key: new_value} a aplicar en Streamlit
+    pending_ui_updates: Optional[Dict[str, Any]]
