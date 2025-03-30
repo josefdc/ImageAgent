@@ -303,5 +303,4 @@ image-editor/
 - [Matplotlib](https://matplotlib.org/)
 - [OpenAI](https://openai.com/) (or other LLM/TTS providers)
 
----
-Made with ❤️ by @josefdc @Esteban8482
+Made with ❤️ by @josefdc @Esteban84
