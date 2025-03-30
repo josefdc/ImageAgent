@@ -157,10 +157,5 @@ streamlit run app.py
 - [NumPy](https://numpy.org/) for numerical processing
 - [Matplotlib](https://matplotlib.org/) for histogram visualization
 
----
 
-<<<<<<< HEAD
-Made with ❤️ by @josefdc @Esteban8482
-=======
-Made with ❤️ by @josefdc    Esteban8482
->>>>>>> 3877440 (Add initial test suite with placeholder tests and pytest configuration)
+Made with ❤️ by @josefdc @Esteban848
