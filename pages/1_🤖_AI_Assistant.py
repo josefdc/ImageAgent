@@ -90,6 +90,7 @@ try:
     # Explicitly ensure chat history and thread ID exist after initialization
     if 'chat_history' not in st.session_state: st.session_state.chat_history = []
     if 'current_graph_thread_id' not in st.session_state:
+        # Use a more robust default thread ID if needed, or generate one
         st.session_state.current_graph_thread_id = f"thread_{int(time.time())}"
         logger.info(f"Initialized new graph thread ID: {st.session_state.current_graph_thread_id}")
     if 'assistant_thinking' not in st.session_state: st.session_state.assistant_thinking = False
@@ -124,13 +125,18 @@ def display_chat_history(container):
         # Iterate through stored messages
         for i, msg_data in enumerate(chat_history):
             # Basic validation of message structure
-            if isinstance(msg_data, dict) and "role" in msg_data and "content" in msg_data:
+            # Allow content to be None if tool_calls exist (for AIMessage)
+            if isinstance(msg_data, dict) and "role" in msg_data:
                 role = msg_data["role"]
-                content = msg_data.get("content", "")
+                content = msg_data.get("content") # Can be None
+                tool_calls = msg_data.get("tool_calls") # Check for tool calls
 
-                # Ensure content is string type for display
-                if isinstance(content, BaseMessage): content = str(content.content)
-                elif not isinstance(content, str): content = str(content)
+                # Ensure content is string type for display if it exists
+                display_content = ""
+                if content is not None:
+                    if isinstance(content, BaseMessage): display_content = str(content.content)
+                    elif not isinstance(content, str): display_content = str(content)
+                    else: display_content = content
 
                 # Assign avatar based on role
                 avatar = {"user": "👤", "assistant": "✨", "system": "⚙️", "tool": "🛠️"}.get(role, "❓")
@@ -140,11 +146,16 @@ def display_chat_history(container):
                     with st.chat_message(name=role, avatar=avatar):
                         # Apply specific formatting
                         if role == "tool":
-                            st.markdown(f"```\nTool Result:\n{content}\n```")
+                            st.markdown(f"```\nTool Result:\n{display_content}\n```")
                         elif role == "system": # General system messages
-                             st.warning(content, icon="⚙️")
-                        else: # User and Assistant messages
-                            st.markdown(content)
+                             st.warning(display_content, icon="⚙️")
+                        elif role == "assistant" and tool_calls:
+                             # Display AI message that contains tool calls (might have text too)
+                             if display_content: st.markdown(display_content)
+                             tool_names = [tc.get('name', 'unknown') for tc in tool_calls]
+                             st.markdown(f"*Assistant decided to use tool(s): `{', '.join(tool_names)}`*")
+                        else: # User and normal Assistant messages
+                            st.markdown(display_content)
                 except Exception as display_e:
                     logger.error(f"Failed displaying message index {i} (role={role}): {display_e}")
                     try: st.error(f"Error displaying message #{i+1}...") # Minimal error in UI
@@ -157,25 +168,38 @@ def display_chat_history(container):
             with st.chat_message("assistant", avatar="⚠️"):
                 st.warning("AI Assistant is currently unavailable. Check configuration/logs.")
 
-# --- Helper Function to Add Message ---
-def add_message_to_history(role: str, content: Any):
-    """Adds a message dictionary to the chat history state if content is valid."""
-    msg_content_str = ""
-    if isinstance(content, BaseMessage): msg_content_str = str(content.content)
-    elif isinstance(content, str): msg_content_str = content
-    else:
-        try: msg_content_str = str(content)
-        except: msg_content_str = "[Error converting content to string]"
-        logger.warning(f"Converted non-string content (Type: {type(content)}) to string for chat history.")
+# --- Helper Function to Add Message (Updated) ---
+def add_message_to_history(role: str, content: Any, tool_call_id: Optional[str] = None, tool_calls: Optional[List[Dict]] = None):
+    """Adds a message dictionary to the chat history state if content or tool_calls are valid."""
+    # Allow messages with only tool_calls (AIMessage) or only content
+    if content is None and not tool_calls:
+        logger.warning(f"Attempted to add message with empty content/tool_calls for role {role}. Skipping.")
+        return
 
-    if msg_content_str:
-        # Ensure chat_history is a list before appending
-        if not isinstance(st.session_state.get('chat_history'), list):
-            st.session_state.chat_history = []
-        st.session_state.chat_history.append({"role": role, "content": msg_content_str})
-        logger.debug(f"Added '{role}' message to history.")
-    else:
-        logger.warning(f"Attempted to add message with empty/invalid content for role '{role}'")
+    # Convert content to string if it exists and isn't already
+    msg_content_str = None
+    if content is not None:
+        if isinstance(content, BaseMessage): msg_content_str = str(content.content)
+        elif isinstance(content, str): msg_content_str = content
+        else:
+            try: msg_content_str = str(content)
+            except: msg_content_str = "[Error converting content to string]"
+            logger.warning(f"Converted non-string content (Type: {type(content)}) to string for chat history.")
+
+    message_dict = {"role": role, "content": msg_content_str} # Content can be None here
+    if tool_call_id:
+        message_dict["tool_call_id"] = tool_call_id
+    if tool_calls:
+        # Ensure tool_calls are serializable if needed, though they often are dicts
+        message_dict["tool_calls"] = tool_calls
+
+    # Ensure chat_history exists and is a list
+    if 'chat_history' not in st.session_state or not isinstance(st.session_state.chat_history, list):
+        st.session_state.chat_history = []
+
+    st.session_state.chat_history.append(message_dict)
+    logger.debug(f"Added message to history: Role={role}, Content='{str(msg_content_str)[:50] if msg_content_str else 'None'}...', ToolCallId={tool_call_id}, HasToolCalls={bool(tool_calls)}")
+
 
 # --- Helper Function to Get Image Status ---
 def get_image_status_message() -> str:
@@ -302,13 +326,16 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
 
     logger.info(f"Processing prompt: {prompt_to_process}")
     # Add user message to history if it's not already the last message
-    if not st.session_state.chat_history or st.session_state.chat_history[-1].get("content") != prompt_to_process:
+    # Use the updated add_message_to_history function
+    if not st.session_state.chat_history or \
+       st.session_state.chat_history[-1].get("role") != "user" or \
+       st.session_state.chat_history[-1].get("content") != prompt_to_process:
         add_message_to_history("user", prompt_to_process)
         # Trigger a quick rerun to display the user message immediately *before* processing
         # This can make the UI feel more responsive.
         # st.rerun() # Removed this immediate rerun to avoid potential double processing issues
 
-    # --- Construct input for the graph ---
+    # --- Construct input for the graph (Updated with Pydantic Fix) ---
     lc_messages: List[BaseMessage] = []
 
     # *** ADD DYNAMIC SYSTEM MESSAGE ***
@@ -317,34 +344,42 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
     # *********************************
 
     # Convert rest of Streamlit message history to LangChain BaseMessages
-    # Ensure chat_history is a list
     chat_history_list = st.session_state.get('chat_history', [])
     if not isinstance(chat_history_list, list): chat_history_list = []
 
-    for message in chat_history_list:
+    for message_data in chat_history_list:
+        role = message_data.get("role")
+        content = message_data.get("content") # Content can be None
+        tool_call_id = message_data.get("tool_call_id")
+        tool_calls = message_data.get("tool_calls") # Get stored tool calls
+
         # Avoid adding the system message again if it was stored previously
-        if message.get("role") == "system": continue
-        elif message.get("role") == "user":
-            lc_messages.append(HumanMessage(content=message.get("content", "")))
-        elif message.get("role") == "assistant":
-            # This part might need adjustment based on how tool calls/results are stored.
-            # For now, assume simple AIMessage content.
-            # If tool calls/results are stored, you might need AIMessage(content=..., tool_calls=...)
-            # or add ToolMessages appropriately.
-            lc_messages.append(AIMessage(content=message.get("content", "")))
-        elif message.get("role") == "tool":
-             # If tool results are stored in history, convert them too
-             # This assumes content is the string result. Adjust if needed.
-             # ToolMessage requires a tool_call_id, which might not be easily available
-             # from simple history. Consider storing tool calls/results differently
-             # or just passing AIMessage/HumanMessage history.
-             # For now, skipping tool messages from history to avoid complexity.
-             logger.warning("Skipping 'tool' message from history conversion for graph input.")
-             pass
+        if role == "system": continue
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content or "")) # Ensure content is string
+        elif role == "assistant":
+            # Reconstruct AIMessage (Pydantic Fix Applied)
+            ai_kwargs = {"content": content or ""}
+            # Only add tool_calls if it's a non-empty list
+            if tool_calls and isinstance(tool_calls, list):
+                ai_kwargs["tool_calls"] = tool_calls
+            try:
+                lc_messages.append(AIMessage(**ai_kwargs))
+            except Exception as e:
+                 logger.error(f"Failed to reconstruct AIMessage from history: {message_data}. Error: {e}", exc_info=True)
+                 continue # Skip adding corrupted message
+        elif role == "tool":
+             # Reconstruct ToolMessage using content and tool_call_id
+             if tool_call_id:
+                 lc_messages.append(ToolMessage(content=content or "", tool_call_id=tool_call_id)) # Ensure content is string
+             else:
+                 logger.warning(f"Skipping tool message from history - missing tool_call_id: {message_data}")
 
     graph_input = {"messages": lc_messages}
     config = {"configurable": {"thread_id": st.session_state.current_graph_thread_id}}
     logger.info(f"Streaming graph for thread: {config['configurable']['thread_id']}")
+    logger.debug(f"Graph Input Messages: {[m.type + ': ' + (str(m.content)[:50] if m.content else '[No Content]') + (' (TC)' if getattr(m, 'tool_calls', None) else '') + (' (TID:' + getattr(m, 'tool_call_id', '') + ')' if getattr(m, 'tool_call_id', None) else '') for m in lc_messages]}")
+
 
     # Initialize variables for this run
     final_assistant_message_content: Optional[str] = None
@@ -370,6 +405,41 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
                 last_message = messages[-1]
                 logger.debug(f"Stream step: Last msg type={type(last_message).__name__}")
 
+                # --- ADD THIS BLOCK (Updated) ---
+                # Add the message received from the graph step to the persistent chat history
+                current_chat_history = st.session_state.get('chat_history', [])
+                new_message_added = False
+                if isinstance(last_message, AIMessage):
+                    # Check if this exact AIMessage (content + tool_calls) is already the last one
+                    # Need to handle None content correctly
+                    msg_content = getattr(last_message, 'content', None)
+                    msg_tool_calls = getattr(last_message, 'tool_calls', None)
+                    temp_dict = {"role": "assistant", "content": msg_content, "tool_calls": msg_tool_calls}
+                    last_hist_entry = current_chat_history[-1] if current_chat_history else {}
+                    if not current_chat_history or \
+                       last_hist_entry.get("role") != "assistant" or \
+                       last_hist_entry.get("content") != temp_dict["content"] or \
+                       last_hist_entry.get("tool_calls") != temp_dict["tool_calls"]:
+                         add_message_to_history("assistant", msg_content, tool_calls=msg_tool_calls)
+                         new_message_added = True
+                elif isinstance(last_message, ToolMessage):
+                     # Check if this exact ToolMessage is already the last one
+                    temp_dict = {"role": "tool", "content": str(last_message.content), "tool_call_id": last_message.tool_call_id}
+                    if not current_chat_history or current_chat_history[-1] != temp_dict:
+                        add_message_to_history("tool", str(last_message.content), tool_call_id=last_message.tool_call_id)
+                        new_message_added = True
+                # Add other message types if necessary (e.g., SystemMessage from errors)
+                elif isinstance(last_message, SystemMessage):
+                     # Check if this exact SystemMessage is already the last one
+                    temp_dict = {"role": "system", "content": str(last_message.content)}
+                    if not current_chat_history or current_chat_history[-1] != temp_dict:
+                        add_message_to_history("system", str(last_message.content))
+                        new_message_added = True
+
+                if new_message_added:
+                    logger.debug(f"Added {last_message.type} message from stream to chat history.")
+                # --- END ADDED BLOCK ---
+
                 status_label_update = "Processing..." # Default status label
                 is_final_ai_text_step = False
 
@@ -378,15 +448,22 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
                     if last_message.tool_calls:
                         tool_names = [tc.get('name', 'unknown') for tc in last_message.tool_calls]
                         status_label_update = f"Assistant using tool(s): `{', '.join(tool_names)}`..."
+                        # Don't capture final content if it's just a tool call message
+                        final_assistant_message_content = None
                     else:
+                        # Only capture content if it's a final text response (no tool calls)
                         final_assistant_message_content = str(last_message.content)
                         is_final_ai_text_step = True
                         status_label_update = "Assistant generating response..."
                 elif isinstance(last_message, ToolMessage):
-                     tool_name = getattr(last_message, 'name', 'tool')
-                     status_label_update = f"Processing `{tool_name}` result..."
+                     tool_name = getattr(last_message, 'name', 'tool') # ToolMessage doesn't have 'name' directly, use ID or content?
+                     status_label_update = f"Processing tool result (ID: {last_message.tool_call_id})..."
+                     # Don't capture final content from tool message
+                     final_assistant_message_content = None
                 elif isinstance(last_message, SystemMessage):
                      status_label_update = f"System message received..."
+                     # Don't capture final content from system message
+                     final_assistant_message_content = None
 
                 # Update the placeholder with the latest AI text *only if it's the final one*
                 # Otherwise, just show "Thinking..." or "Using tool..."
@@ -395,6 +472,8 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
                      display_text = final_assistant_message_content + " ▌" # Add cursor only if streaming text
                 elif isinstance(last_message, AIMessage) and last_message.tool_calls:
                      display_text = status_label_update # Show tool call status
+                elif isinstance(last_message, ToolMessage):
+                     display_text = status_label_update # Show tool processing status
                 response_placeholder.markdown(display_text)
 
                 # Update the status box label
@@ -406,14 +485,18 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
                 response_placeholder.markdown(final_assistant_message_content) # Final text
                 status_box.update(label="Assistant response complete.", state="complete", expanded=False)
             elif not stream_error: # Finished without specific final text (e.g., after tool)
+                 # Check last message type to provide better status
+                 last_msg_type = type(messages[-1]).__name__ if messages else "Unknown"
+                 status_msg = f"Processing finished ({last_msg_type})."
                  response_placeholder.markdown("Task completed.") # Clear placeholder
-                 status_box.update(label="Processing finished.", state="complete", expanded=False)
+                 status_box.update(label=status_msg, state="complete", expanded=False)
 
         except Exception as e:
             stream_error = e
             logger.error(f"Error during AI assistant stream: {e}", exc_info=True)
             error_msg_content = f"⚠️ Error processing request: {str(e)[:200]}"
             status_box.update(label="Processing failed!", state="error", expanded=True)
+            # Add error message to history using the updated function
             add_message_to_history("system", error_msg_content)
             # Ensure placeholder shows error
             if 'response_placeholder' in locals(): response_placeholder.error(error_msg_content)
@@ -423,19 +506,12 @@ if prompt_to_process and _AGENT_AVAILABLE and _COMPILED_GRAPH and st.session_sta
     # --- Post-Stream Processing ---
     st.session_state.assistant_thinking = False # Reset thinking flag
 
-    # Add final assistant *text* message to history (if captured and no error)
-    if final_assistant_message_content and not stream_error:
-        # Check if the last message isn't already this exact assistant message
-        if not st.session_state.chat_history or \
-           st.session_state.chat_history[-1].get("role") != "assistant" or \
-           st.session_state.chat_history[-1].get("content") != final_assistant_message_content:
-            add_message_to_history("assistant", final_assistant_message_content)
-
     # --- Rerun is now ALWAYS needed after processing ---
     # Because the graph's 'update_app_state' node might have modified
     # session_state (image or widgets) even if this page doesn't see it directly.
     # Rerunning ensures the image preview and any potentially affected widget
     # (if user navigates back) are up-to-date.
+    # Also ensures the chat history display is updated with messages added during the stream.
     logger.info(f"Post-stream: Final AI Msg='{final_assistant_message_content[:50] if final_assistant_message_content else 'None'}...', Error='{stream_error}'")
     logger.info(f"Rerunning page after AI stream/processing. Stream error={bool(stream_error)}")
     # Optional short delay for user to see final status/error

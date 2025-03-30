@@ -104,7 +104,7 @@ def get_llm():
         return None
     logger.info(f"OpenAI API Key loaded from: {source}")
     try:
-        model = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key, max_retries=1, timeout=45)
+        model = ChatOpenAI(model="gpt-4o-2024-11-20", temperature=0, api_key=api_key, max_retries=1, timeout=45)
         _cached_llm = model
         logger.info("ChatOpenAI model initialized.")
         return model
@@ -134,6 +134,26 @@ def call_agent(state: AgentState) -> Dict[str, Any]:
     messages = state.get("messages", [])
     valid_messages = [msg for msg in messages if isinstance(msg, BaseMessage)]
     if not valid_messages: logger.warning("call_agent: No valid messages found."); return {}
+    
+    # Check for any assistant messages with tool_calls that aren't followed by matching tool messages
+    for i, msg in enumerate(valid_messages):
+        if isinstance(msg, AIMessage) and getattr(msg, 'tool_calls', None):
+            needed_tool_call_ids = {tc.get('id') if isinstance(tc, dict) else tc.id 
+                                    for tc in msg.tool_calls if tc}
+            
+            # Check which tool calls are followed by responses
+            for j in range(i + 1, len(valid_messages)):
+                if isinstance(valid_messages[j], ToolMessage):
+                    tool_id = getattr(valid_messages[j], 'tool_call_id', None)
+                    if tool_id in needed_tool_call_ids:
+                        needed_tool_call_ids.remove(tool_id)
+            
+            # If any tool calls aren't matched with responses, log and remove the assistant message
+            if needed_tool_call_ids:
+                logger.warning(f"Found AI message with unmatched tool calls: {needed_tool_call_ids}. Removing from history.")
+                valid_messages = valid_messages[:i] + valid_messages[i+1:]
+                break
+    
     logger.debug(f"Invoking agent with {len(valid_messages)} valid messages.")
     try:
         response = agent_executor.invoke(valid_messages)
@@ -141,7 +161,9 @@ def call_agent(state: AgentState) -> Dict[str, Any]:
         tool_calls_present = bool(getattr(response, 'tool_calls', None))
         logger.info(f"Agent response received: Type={type(response).__name__}, ToolCalls={tool_calls_present}")
         return {"messages": [response]}
-    except Exception as e: logger.error(f"Agent invocation failed: {e}", exc_info=True); return {"messages": [SystemMessage(content=f"Error during LLM communication: {e}")]}
+    except Exception as e: 
+        logger.error(f"Agent invocation failed: {e}", exc_info=True)
+        return {"messages": [SystemMessage(content=f"Error during LLM communication: {e}")]}
 
 def prepare_tool_run(state: AgentState) -> Dict[str, Any]:
     """Node: Extracts the first tool call request from the last AI message."""
@@ -181,7 +203,7 @@ def prepare_tool_run(state: AgentState) -> Dict[str, Any]:
     logger.debug(f"Returning from prepare_tool_run with tool_request: {tool_request}")
     return {"tool_invocation_request": tool_request}
 
-# MODIFIED Node: Executes tool using _execute_impl, returns ToolMessage and pending UI updates
+# --- Updated execute_tool Node ---
 def execute_tool(state: AgentState) -> Dict[str, Any]:
     """
     Node: Executes the tool specified in 'tool_invocation_request'.
@@ -195,7 +217,12 @@ def execute_tool(state: AgentState) -> Dict[str, Any]:
     # 1. Validate the request
     if not request or not isinstance(request, dict) or not request.get("tool_name") or not request.get("tool_call_id"):
         logger.warning("execute_tool: Invalid or missing tool request. Skipping execution.")
-        return {"tool_invocation_request": None, "pending_ui_updates": None}
+        # Return a ToolMessage indicating the error, otherwise the agent might get stuck
+        error_msg = "Internal Error: Invalid tool request received by execute_tool node."
+        # Use a placeholder ID if the original is missing
+        error_tool_call_id = request.get("tool_call_id") if request else "error_missing_request_id"
+        tool_msg = ToolMessage(content=error_msg, tool_call_id=error_tool_call_id)
+        return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
 
     tool_name = request["tool_name"]
     tool_args = request.get("tool_args", {})
@@ -210,6 +237,7 @@ def execute_tool(state: AgentState) -> Dict[str, Any]:
         if tool_name in available_tools:
              logger.info(f"Executing info tool '{tool_name}' directly via schema invoke.")
              try:
+                 # Invoke the @tool decorated function directly
                  tool_message_content = available_tools[tool_name].invoke(tool_args or {})
                  tool_msg = ToolMessage(content=str(tool_message_content), tool_call_id=tool_call_id)
                  logger.info(f"Tool '{tool_name}' executed successfully. Result: {str(tool_message_content)[:100]}...")
@@ -259,6 +287,7 @@ def execute_tool(state: AgentState) -> Dict[str, Any]:
         logger.error(f"Tool implementation for '{tool_name}' not found in tool_implementations map.")
         tool_msg = ToolMessage(content=f"Error: Tool '{tool_name}' is not implemented.", tool_call_id=tool_call_id)
         return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+# --- End of Updated execute_tool Node ---
 
 # MODIFIED Node: Applies ONLY pending UI updates to Streamlit state
 def update_app_state(state: AgentState) -> Dict[str, Any]:
