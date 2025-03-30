@@ -8,8 +8,9 @@
 
 -----
 
-**[NOTE: Replace this placeholder link with an actual screenshot or GIF!]**
-![Screenshot/GIF of application](https://via.placeholder.com/800x450.png?text=AI+Image+Editor+Screenshot)
+
+![image](https://github.com/user-attachments/assets/ecc51798-e926-43f8-bc5c-7afead1a80b3)
+
 
 -----
 
