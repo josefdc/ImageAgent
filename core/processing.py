@@ -1,4 +1,4 @@
-# streamlit_image_editor/core/processing.py
+# image_editor/core/processing.py
 import streamlit as st # Keep for feedback messages
 from PIL import Image, ImageEnhance, ImageOps
 import numpy as np

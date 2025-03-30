@@ -1,4 +1,4 @@
-# streamlit_image_editor/ui/interface.py
+# image_editor/ui/interface.py
 import streamlit as st
 from state.session_state_manager import reset_all_state, reset_triggered_flags
 from core.image_io import load_image, prepare_image_for_download
@@ -6,6 +6,43 @@ from utils.constants import IMAGE_TYPES, DEFAULT_SAVE_FORMAT, DEFAULT_MIME_TYPE,
 from core.histogram import generate_histogram_figure
 import numpy as np
 import matplotlib.pyplot as plt # Import plt for close
+
+# --- API Key Input Function ---
+def get_api_key_input(service_name: str, key_name: str, signup_url: str = "") -> None:
+    """
+    Display an input for an API key with proper instructions.
+    
+    Args:
+        service_name: Name of the service (e.g., "OpenAI")
+        key_name: Environment variable name to store the key (e.g., "OPENAI_API_KEY")
+        signup_url: Optional URL for signing up for the service
+    """
+    import os
+    
+    # Check if key exists in environment already
+    api_key = os.environ.get(key_name, "")
+    
+    # Create input with appropriate help text
+    help_text = f"Enter your {service_name} API key"
+    if signup_url:
+        help_text += f" (Get one at [{service_name}]({signup_url}))"
+        
+    new_api_key = st.text_input(
+        f"{service_name} API Key", 
+        value=api_key,
+        type="password",
+        help=help_text,
+        key=f"{key_name}_input"
+    )
+    
+    # Update environment variable if changed
+    if new_api_key and new_api_key != api_key:
+        os.environ[key_name] = new_api_key
+        st.success(f"{service_name} API key set!")
+    elif not new_api_key and api_key:
+        # Key was cleared
+        os.environ.pop(key_name, None)
+        st.warning(f"{service_name} API key removed.")
 
 def build_sidebar():
     """Creates and manages the sidebar widgets and logic."""

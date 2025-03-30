@@ -1,4 +1,4 @@
-# streamlit_image_editor/core/histogram.py
+#image_editor/core/histogram.py
 import streamlit as st
 from PIL import Image
 import numpy as np
