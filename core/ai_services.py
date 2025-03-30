@@ -365,7 +365,7 @@ if __name__ == "__main__":
 
         # Test Search and Replace
         logger.info("\n--- Testing Search and Replace ---")
-        replaced = search_and_reQlace_ai(test_img.copy(), search_prompt="the red shape", prompt="a green star")
+        replaced = search_and_replace_ai(test_img.copy(), search_prompt="the red shape", prompt="a green star")
         if replaced: logger.info(f"Search/Replace Result: Mode={replaced.mode}, Size={replaced.size}")
         else: logger.error("Search and Replace FAILED.")
 
