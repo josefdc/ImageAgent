@@ -1,5 +1,6 @@
 # streamlit_image_editor/agent/agent_graph.py
-# Builds and compiles the LangGraph agent workflow.
+# Builds and compiles the LangGraph agent workflow, orchestrating node execution
+# and interactions with Streamlit state.
 
 # --- Standard Library Imports ---
 import os
@@ -7,9 +8,9 @@ import sys
 from pathlib import Path
 import logging
 from typing import Literal, Optional, Dict, Any, Tuple
+import inspect # Needed for inspecting tool implementation signatures
 
 # --- Path Setup (Add Project Root) ---
-# Ensures local modules can be imported when run directly or by Streamlit
 try:
     _PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent
     if str(_PROJECT_ROOT_DIR) not in sys.path:
@@ -20,133 +21,108 @@ except Exception as e:
 
 # --- Third-Party Imports ---
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver # For conversation memory
-from langchain_openai import ChatOpenAI             # Example LLM provider
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, ToolMessage, BaseMessage, HumanMessage, SystemMessage
-from PIL import Image                               # For type checking
+from PIL import Image
 
 # --- Local Application Imports ---
-# Import necessary components from other local modules
 _DEPENDENCIES_LOADED = False
+_STATE_MANAGER_LOADED = False
+_TOOLS_LOADED = False
 try:
+    # Import the state definition WITHOUT 'updated_image'
     from agent.graph_state import AgentState, ToolInvocationRequest
-    from agent.tools import available_tools, tool_implementations
-    # Import the state manager function needed within the graph node
+    # Import schemas (available_tools), implementation map (tool_implementations),
+    # and the helpers (_execute_impl, _get_current_image)
+    from agent.tools import available_tools, tool_implementations, _execute_impl, _get_current_image
+    _TOOLS_LOADED = True
+    # Import the function to update Streamlit's global state (used by _execute_impl)
     from state.session_state_manager import update_processed_image
+    _STATE_MANAGER_LOADED = True
     _DEPENDENCIES_LOADED = True
     print("DEBUG (agent_graph.py): Successfully imported agent dependencies.")
 except ImportError as e:
     print(f"ERROR (agent_graph.py): Failed to import agent dependencies: {e}")
-    print(f"Current sys.path: {sys.path}")
-    # Define dummies if import fails to allow basic structure loading
+    # Define dummies
     class AgentState(dict): pass
     class ToolInvocationRequest(dict): pass
     available_tools = {}
     tool_implementations = {}
-    def update_processed_image(img): print("[MOCK] update_processed_image called")
+    def _get_current_image(): return None
+    def _execute_impl(*args, **kwargs): return "Mock execution result", None
+    def update_processed_image(img): print("[MOCK] update_processed_image")
+except Exception as e:
+    print(f"ERROR (agent_graph.py): Unexpected error during dependency import: {e}")
+    # Define dummies
+    class AgentState(dict): pass
+    class ToolInvocationRequest(dict): pass
+    available_tools = {}
+    tool_implementations = {}
+    def _get_current_image(): return None
+    def _execute_impl(*args, **kwargs): return "Mock execution result", None
+    def update_processed_image(img): print("[MOCK] update_processed_image")
 
 # --- Streamlit Import (Conditional) ---
-# Detect if running within a Streamlit application context
 _IN_STREAMLIT_CONTEXT = False
+_st_module = None
 try:
     import streamlit as st
-    if hasattr(st, 'secrets'): # A reasonable check for running context
+    if hasattr(st, 'secrets'):
          _IN_STREAMLIT_CONTEXT = True
-except (ImportError, RuntimeError):
-    pass # Fail silently if streamlit is not available or not running
+         _st_module = st
+except (ImportError, RuntimeError): pass
 
 # --- Logging Setup ---
-# Configure logging for this module
-log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=log_level,
-                    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+log_level = os.environ.get("LOG_LEVEL", "DEBUG").upper()
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s [%(levelname)s] - %(message)s (%(filename)s:%(lineno)d)')
 logger = logging.getLogger(__name__)
 logger.info(f"Logging level set to {log_level}")
 logger.info(f"Dependencies Loaded: {_DEPENDENCIES_LOADED}")
+logger.info(f"State Manager Loaded: {_STATE_MANAGER_LOADED}")
+logger.info(f"Tools Loaded: {_TOOLS_LOADED}")
 logger.info(f"Streamlit Context: {_IN_STREAMLIT_CONTEXT}")
 
-# --- LLM and Agent Executor Configuration (Cached) ---
-# Simple in-memory cache for LLM and executor to avoid re-initialization on every run
+# --- LLM and Agent Executor Configuration ---
 _cached_llm = None
 _cached_agent_executor = None
 
 def get_llm():
     """Safely initializes and returns the ChatOpenAI model, using a simple cache."""
     global _cached_llm
-    if _cached_llm:
-        logger.debug("Returning cached LLM instance.")
-        return _cached_llm
-
-    # Determine API key source
-    api_key = None
-    source = "Not Found"
-    if _IN_STREAMLIT_CONTEXT:
-        try:
-            key = st.secrets.get("OPENAI_API_KEY")
-            if key: api_key = key; source = "Streamlit Secrets"
-        except Exception as e: logger.warning(f"Error accessing St secrets for OpenAI Key: {e}")
+    if _cached_llm: return _cached_llm
+    api_key = None; source = "Not Found"
+    if _IN_STREAMLIT_CONTEXT and _st_module:
+        try: key = _st_module.secrets.get("OPENAI_API_KEY");
+        except: key = None
+        if key: api_key = key; source = "Streamlit Secrets"
+    if not api_key: key = os.environ.get("OPENAI_API_KEY");
+    if key: api_key = key; source = "Env Var"
     if not api_key:
-        key = os.environ.get("OPENAI_API_KEY")
-        if key: api_key = key; source = "Env Var"
-
-    # Handle missing key
-    if not api_key:
-        message = "OpenAI API Key not found (Checked St Secrets & Env Var). AI Agent cannot function."
-        logger.error(message)
-        if _IN_STREAMLIT_CONTEXT:
-            try: st.error(message)
-            except Exception as streamlit_e: logger.warning(f"Failed to show St error: {streamlit_e}")
+        logger.error("OpenAI API Key not found. AI Agent disabled.")
         return None
-
     logger.info(f"OpenAI API Key loaded from: {source}")
-
-    # Initialize LLM
     try:
-        model = ChatOpenAI(
-            model="gpt-4o-mini", # Or configure via env var/secrets
-            temperature=0, # Low temperature for predictable tool use
-            api_key=api_key,
-            max_retries=2, # Add some resilience
-            timeout=30 # Set a reasonable timeout
-        )
+        model = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key, max_retries=1, timeout=45)
         _cached_llm = model
-        logger.info("ChatOpenAI model initialized successfully.")
+        logger.info("ChatOpenAI model initialized.")
         return model
-    except Exception as e:
-        message = f"Failed to initialize ChatOpenAI model: {e}"
-        logger.error(message, exc_info=True)
-        if _IN_STREAMLIT_CONTEXT:
-            try: st.error(message)
-            except Exception as streamlit_e: logger.warning(f"Failed to show St error: {streamlit_e}")
-        return None
+    except Exception as e: logger.error(f"Failed to initialize ChatOpenAI: {e}", exc_info=True); return None
 
 def get_agent_executor():
     """Creates the agent executor by binding tools to the LLM, using a simple cache."""
     global _cached_agent_executor
-    if _cached_agent_executor:
-        logger.debug("Returning cached agent executor instance.")
-        return _cached_agent_executor
-
+    if _cached_agent_executor: return _cached_agent_executor
     llm = get_llm()
-    if llm is None: return None # Error already logged by get_llm
-
-    if not available_tools: # Check if the tool dictionary imported correctly
-        logger.error("No tools available for agent binding. Check agent/tools.py import and definitions.")
-        return None
-
+    if llm is None: return None
+    if not available_tools: logger.error("No tools available for binding."); return None
     try:
-        # Bind the TOOL DEFINITIONS (@tool decorated functions) from tools.py
         llm_with_tools = llm.bind_tools(list(available_tools.values()))
         logger.info(f"LLM bound with {len(available_tools)} tools: {list(available_tools.keys())}")
         _cached_agent_executor = llm_with_tools
         return llm_with_tools
-    except Exception as e:
-        message = f"CRITICAL: Failed to bind tools to LLM. Check tool schemas in agent/tools.py. Error: {e}"
-        logger.error(message, exc_info=True)
-        if _IN_STREAMLIT_CONTEXT:
-            try: st.error(message)
-            except Exception as streamlit_e: logger.warning(f"Failed to show St error: {streamlit_e}")
-        return None
+    except Exception as e: logger.error(f"Failed to bind tools to LLM: {e}", exc_info=True); return None
 
 # --- Graph Node Definitions ---
 
@@ -154,207 +130,180 @@ def call_agent(state: AgentState) -> Dict[str, Any]:
     """Node: Invokes the LLM agent with the current message history."""
     logger.info("Node: call_agent - Starting execution")
     agent_executor = get_agent_executor()
-    if agent_executor is None:
-        logger.error("Agent executor unavailable in call_agent.")
-        return {"messages": [SystemMessage(content="LLM Error: Agent not configured.")]}
-
+    if agent_executor is None: return {"messages": [SystemMessage(content="LLM Error: Agent not configured.")]}
     messages = state.get("messages", [])
-    if not messages:
-         logger.warning("call_agent invoked with empty message history. Skipping.")
-         return {} # No change to state
-
-    # Ensure messages are valid BaseMessage instances
     valid_messages = [msg for msg in messages if isinstance(msg, BaseMessage)]
-    if not valid_messages:
-        logger.error("call_agent: No valid messages found. Cannot invoke LLM.")
-        return {"messages": [SystemMessage(content="Internal Error: Invalid message history.")]}
-
+    if not valid_messages: logger.warning("call_agent: No valid messages found."); return {}
     logger.debug(f"Invoking agent with {len(valid_messages)} valid messages.")
     try:
         response = agent_executor.invoke(valid_messages)
-        logger.info(f"Agent response received: Type={type(response).__name__}, ToolCalls={bool(getattr(response, 'tool_calls', None))}")
-        return {"messages": [response]} # Return list for add_messages reducer
-    except Exception as e:
-        logger.error(f"Agent invocation failed: {e}", exc_info=True)
-        return {"messages": [SystemMessage(content=f"Error during LLM communication: {e}")]}
+        logger.debug(f"Raw response from agent invoke: {response}")
+        tool_calls_present = bool(getattr(response, 'tool_calls', None))
+        logger.info(f"Agent response received: Type={type(response).__name__}, ToolCalls={tool_calls_present}")
+        return {"messages": [response]}
+    except Exception as e: logger.error(f"Agent invocation failed: {e}", exc_info=True); return {"messages": [SystemMessage(content=f"Error during LLM communication: {e}")]}
 
 def prepare_tool_run(state: AgentState) -> Dict[str, Any]:
     """Node: Extracts the first tool call request from the last AI message."""
     logger.info("Node: prepare_tool_run - Starting execution")
     messages = state.get("messages", [])
-    tool_request = None # Default to no request
-
+    tool_request = None
     if messages:
         last_message = messages[-1]
         if isinstance(last_message, AIMessage) and getattr(last_message, 'tool_calls', None):
-            if last_message.tool_calls:
-                # Process only the first tool call for now
-                tool_call = last_message.tool_calls[0]
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("args", {})
-                tool_call_id = tool_call.get("id")
+            tool_calls = last_message.tool_calls
+            if tool_calls:
+                logger.debug(f"AIMessage tool_calls found: {tool_calls}")
+                tool_call = tool_calls[0] # Process first call
+                logger.debug(f"Processing tool_call: {tool_call}")
+                if isinstance(tool_call, dict):
+                    tool_name, tool_args, tool_call_id = tool_call.get("name"), tool_call.get("args", {}), tool_call.get("id")
+                elif hasattr(tool_call, 'name') and hasattr(tool_call, 'args') and hasattr(tool_call, 'id'):
+                    tool_name, tool_args, tool_call_id = tool_call.name, tool_call.args, tool_call.id
+                else:
+                    logger.error(f"Unrecognized tool_call structure: {tool_call} (Type: {type(tool_call)})")
+                    tool_name, tool_args, tool_call_id = None, {}, None
 
                 if tool_name and tool_call_id:
+                    if not isinstance(tool_args, dict):
+                         logger.warning(f"Tool call args for '{tool_name}' is not a dict ({type(tool_args)}), attempting conversion or using empty dict.")
+                         try: tool_args = dict(tool_args)
+                         except: tool_args = {}
                     logger.info(f"Preparing tool run: '{tool_name}', Args: {tool_args}, ID: {tool_call_id}")
-                    tool_request = ToolInvocationRequest(
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        tool_args=tool_args
-                    )
+                    tool_request = ToolInvocationRequest(tool_call_id=tool_call_id, tool_name=tool_name, tool_args=tool_args)
                 else:
-                    logger.error(f"Invalid tool_call structure from LLM: {tool_call}")
-                    # Return an error message immediately, don't proceed to execute
-                    error_msg = ToolMessage(content="Internal Error: Invalid tool call structure.", tool_call_id="error_no_id")
+                    logger.error(f"Invalid tool_call structure from LLM (missing name or id): {tool_call}")
+                    error_msg = ToolMessage(content="Internal Error: Invalid tool call structure received from LLM.", tool_call_id="error_invalid_structure")
                     return {"messages": [error_msg], "tool_invocation_request": None}
-            else:
-                logger.debug("prepare_tool_run: AIMessage has empty tool_calls list.")
-        else:
-            logger.debug("prepare_tool_run: Last message not AIMessage with tool calls.")
-    else:
-        logger.warning("prepare_tool_run: No messages in state.")
-
-    # Update the state with the prepared request (or None if no valid call)
+            else: logger.debug("prepare_tool_run: AIMessage has empty tool_calls list.")
+        else: logger.debug(f"prepare_tool_run: Last message not AIMessage with tool calls (Type: {type(last_message).__name__}).")
+    else: logger.warning("prepare_tool_run: No messages in state.")
+    logger.debug(f"Returning from prepare_tool_run with tool_request: {tool_request}")
     return {"tool_invocation_request": tool_request}
 
-
-def execute_tool_and_update(state: AgentState) -> Dict[str, Any]:
+# MODIFIED Node: Executes tool using _execute_impl, returns ToolMessage and pending UI updates
+def execute_tool(state: AgentState) -> Dict[str, Any]:
     """
-    Node: Executes the prepared tool implementation based on 'tool_invocation_request'.
-          Fetches image from Streamlit state if needed.
-          Updates Streamlit image state via state manager if image changes.
-          Stores potential UI updates in 'pending_ui_updates'.
-          Clears 'tool_invocation_request' and returns the ToolMessage result.
+    Node: Executes the tool specified in 'tool_invocation_request'.
+          Calls the _execute_impl helper from tools.py.
+          Returns the ToolMessage and pending UI updates in the graph state.
+          Image updates are handled *inside* _execute_impl.
     """
-    logger.info("Node: execute_tool_and_update - Starting execution")
+    logger.info("Node: execute_tool - Starting execution")
     request: Optional[ToolInvocationRequest] = state.get("tool_invocation_request")
 
-    # Prepare updates, clearing request and pending UI updates immediately
-    updates_to_return: Dict[str, Any] = {
-        "tool_invocation_request": None,
-        "pending_ui_updates": None # Clear any previous pending UI updates
-    }
-
-    # Validate the request
+    # 1. Validate the request
     if not request or not isinstance(request, dict) or not request.get("tool_name") or not request.get("tool_call_id"):
-        logger.warning("execute_tool_and_update: Invalid/missing tool request. Skipping.")
-        return updates_to_return # Return cleaned state
+        logger.warning("execute_tool: Invalid or missing tool request. Skipping execution.")
+        return {"tool_invocation_request": None, "pending_ui_updates": None}
 
     tool_name = request["tool_name"]
     tool_args = request.get("tool_args", {})
     tool_call_id = request["tool_call_id"]
-    logger.info(f"Executing tool '{tool_name}' with ID '{tool_call_id}' and args: {tool_args}")
+    logger.info(f"Executing tool '{tool_name}' (ID: {tool_call_id}) with args: {tool_args}")
 
-    # --- Initialize variables ---
-    tool_message_content: str = f"Error: Tool implementation '{tool_name}' not found."
-    new_image: Optional[Image.Image] = None
-    ui_updates: Optional[Dict[str, Any]] = None
-    current_image: Optional[Image.Image] = None
-    error_occurred = False
-
-    # --- Check if tool implementation exists ---
+    # 2. Find the implementation function
     tool_impl_func = tool_implementations.get(tool_name)
-    needs_image = False
-    is_info_tool = tool_name == 'get_image_info' # Handle info tool specifically
 
-    if tool_impl_func:
+    # Handle get_image_info specifically (doesn't use _execute_impl)
+    if tool_name == 'get_image_info':
+        if tool_name in available_tools:
+             logger.info(f"Executing info tool '{tool_name}' directly via schema invoke.")
+             try:
+                 tool_message_content = available_tools[tool_name].invoke(tool_args or {})
+                 tool_msg = ToolMessage(content=str(tool_message_content), tool_call_id=tool_call_id)
+                 logger.info(f"Tool '{tool_name}' executed successfully. Result: {str(tool_message_content)[:100]}...")
+                 # Info tool doesn't update UI
+                 return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+             except Exception as e:
+                  logger.error(f"Error executing '{tool_name}' via schema invoke: {e}", exc_info=True)
+                  tool_msg = ToolMessage(content=f"Execution Error: {str(e)}", tool_call_id=tool_call_id)
+                  return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+        else:
+             logger.error(f"'{tool_name}' schema not found in available_tools.")
+             tool_msg = ToolMessage(content=f"Error: Tool schema '{tool_name}' not found.", tool_call_id=tool_call_id)
+             return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+
+    # Handle other tools using the _execute_impl helper
+    elif tool_impl_func:
         try:
-            import inspect
+            # Determine if image is needed by inspecting the implementation function's signature
             sig = inspect.signature(tool_impl_func)
             needs_image = "input_image" in sig.parameters
             logger.debug(f"Tool '{tool_name}' needs image: {needs_image}")
-        except Exception as inspect_e:
-            logger.warning(f"Could not inspect signature for {tool_name}: {inspect_e}")
-    elif not is_info_tool:
-        logger.error(f"Tool implementation for '{tool_name}' not found.")
-        error_occurred = True
-    # Else: it's the get_image_info tool, handled later
 
-    # --- Fetch image from Streamlit state if needed ---
-    if needs_image and not error_occurred:
-        logger.debug(f"Fetching required image for '{tool_name}'...")
-        if _IN_STREAMLIT_CONTEXT:
-            try:
-                current_image_obj = st.session_state.get('processed_image')
-                if current_image_obj is None or not isinstance(current_image_obj, Image.Image):
-                    tool_message_content = "Error: No valid image available to process."
-                    logger.warning(tool_message_content)
-                    error_occurred = True
-                else:
-                    current_image = current_image_obj.copy() # Use a copy
-                    logger.info(f"Image fetched from Streamlit state for '{tool_name}'.")
-            except Exception as e:
-                tool_message_content = "Error: Failed accessing image from app state."
-                logger.error(f"Error accessing st.session_state: {e}", exc_info=True)
-                error_occurred = True
+            # Call the _execute_impl helper (imported from tools.py)
+            # It returns (msg_str, ui_updates) and handles image update internally
+            msg_str, ui_updates = _execute_impl(tool_impl_func, tool_name, needs_image, tool_args)
+
+            tool_msg = ToolMessage(content=msg_str, tool_call_id=tool_call_id)
+            logger.info(f"Tool '{tool_name}' executed via helper. Result: {msg_str[:100]}...")
+            logger.debug(f"Prepared ToolMessage for ID {tool_call_id}. UI updates: {ui_updates}")
+
+            # Return ToolMessage and UI updates in the state dictionary
+            return {
+                "messages": [tool_msg],
+                "tool_invocation_request": None, # Clear the request
+                "pending_ui_updates": ui_updates # Pass UI updates (or None)
+            }
+        except NameError: # If _execute_impl was not imported correctly
+             logger.error("_execute_impl helper not found or imported. Cannot execute tool logic.")
+             tool_msg = ToolMessage(content="Internal Error: Tool execution helper missing.", tool_call_id=tool_call_id)
+             return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+        except Exception as e:
+             logger.error(f"Unexpected error preparing/calling tool impl for '{tool_name}': {e}", exc_info=True)
+             tool_msg = ToolMessage(content=f"Internal Execution Error: {str(e)}", tool_call_id=tool_call_id)
+             return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+
+    else: # Tool implementation not found
+        logger.error(f"Tool implementation for '{tool_name}' not found in tool_implementations map.")
+        tool_msg = ToolMessage(content=f"Error: Tool '{tool_name}' is not implemented.", tool_call_id=tool_call_id)
+        return {"messages": [tool_msg], "tool_invocation_request": None, "pending_ui_updates": None}
+
+# MODIFIED Node: Applies ONLY pending UI updates to Streamlit state
+def update_app_state(state: AgentState) -> Dict[str, Any]:
+    """
+    Node: Processes 'pending_ui_updates' from the graph state and applies
+          them to the Streamlit session_state. Clears this key after processing.
+          Image updates are handled directly by the tool implementation.
+    """
+    logger.info("Node: update_app_state - Starting execution")
+    pending_ui_updates = state.get("pending_ui_updates")
+    app_state_updated = False
+
+    # Apply Pending UI Updates to Streamlit State
+    if pending_ui_updates and isinstance(pending_ui_updates, dict):
+        logger.info(f"Applying pending UI updates to Streamlit session state: {pending_ui_updates}")
+        if _IN_STREAMLIT_CONTEXT and _st_module:
+             try:
+                 for key, value in pending_ui_updates.items():
+                     if hasattr(_st_module, 'session_state') and key in _st_module.session_state:
+                          current_value = _st_module.session_state[key]
+                          if current_value != value:
+                               _st_module.session_state[key] = value
+                               logger.debug(f"Updated st.session_state['{key}'] from {current_value} to {value}")
+                               app_state_updated = True
+                          else:
+                               logger.debug(f"Skipping UI update for key '{key}' - value already set to {value}")
+                     else:
+                          logger.warning(f"Ignoring UI update for key '{key}' - not found in st.session_state.")
+             except Exception as e:
+                  logger.error(f"Error applying UI updates to Streamlit state: {e}", exc_info=True)
+                  try: _st_module.warning("Failed to apply some UI updates.")
+                  except: pass
         else:
-            tool_message_content = "Error: Cannot access image (Agent not in Streamlit context)."
-            logger.warning(tool_message_content)
-            error_occurred = True
+             logger.warning("Cannot apply UI updates - not in Streamlit context or st module unavailable.")
+    elif pending_ui_updates is not None:
+         logger.error(f"Cannot apply UI updates: 'pending_ui_updates' has invalid type {type(pending_ui_updates)}")
 
-    # --- Execute the tool implementation ---
-    if not error_occurred:
-        if tool_impl_func:
-            logger.info(f"Executing implementation: {tool_impl_func.__name__}")
-            try:
-                impl_args = tool_args.copy()
-                if needs_image:
-                    if not current_image: raise ValueError("Internal Error: Image needed but not available.")
-                    impl_args["input_image"] = current_image
-
-                # Call the implementation function
-                tool_result = tool_impl_func(**impl_args)
-
-                # Process the result tuple: (str_result, Optional[Image], Optional[Dict])
-                if isinstance(tool_result, tuple) and len(tool_result) == 3:
-                    tool_message_content, returned_image, returned_ui_updates = tool_result
-                    if returned_image is not None:
-                        if isinstance(returned_image, Image.Image): new_image = returned_image
-                        else: logger.error(f"Tool '{tool_name}' returned invalid image type: {type(returned_image)}")
-                    if isinstance(returned_ui_updates, dict): ui_updates = returned_ui_updates
-                else: # Handle unexpected return format
-                     logger.error(f"Tool '{tool_name}' impl returned unexpected format: {type(tool_result)}")
-                     tool_message_content = f"Error: Tool '{tool_name}' internal error (bad return format)."
-                     error_occurred = True
-
-                logger.info(f"Tool '{tool_name}' executed. Result msg: {str(tool_message_content)[:100]}...")
-
-            except Exception as e:
-                logger.error(f"Error executing tool impl '{tool_name}': {e}", exc_info=True)
-                tool_message_content = f"Execution Error: {str(e)}"
-                error_occurred = True
-
-        elif is_info_tool: # Special case: get_image_info
-            logger.info(f"Executing special tool: {tool_name}")
-            try:
-                tool_message_content = available_tools[tool_name].invoke(tool_args)
-            except Exception as e:
-                logger.error(f"Error executing '{tool_name}': {e}", exc_info=True)
-                tool_message_content = f"Execution Error: {str(e)}"
-                error_occurred = True
-        # else: Error handled by initial check
-
-    # --- Update Streamlit Image State (if applicable) ---
-    if new_image is not None and not error_occurred and _IN_STREAMLIT_CONTEXT:
-        try:
-            update_success = update_processed_image(new_image) # Use manager function
-            if update_success: logger.info(f"Streamlit image state updated by '{tool_name}'.")
-            else:
-                 logger.warning(f"update_processed_image returned False for '{tool_name}'.")
-                 tool_message_content += " (Warning: UI image update failed)"
-        except Exception as state_e:
-            logger.error(f"Failed updating Streamlit state after '{tool_name}': {state_e}", exc_info=True)
-            tool_message_content += " (Warning: Error updating UI image)"
-
-    # --- Prepare final ToolMessage and state updates ---
-    tool_msg = ToolMessage(content=str(tool_message_content), tool_call_id=tool_call_id)
-    logger.debug(f"Prepared ToolMessage for ID {tool_call_id}")
-
-    updates_to_return["messages"] = [tool_msg] # Add message result
-    if ui_updates and not error_occurred: # Add UI updates only if they exist and no error
-        updates_to_return["pending_ui_updates"] = ui_updates
-        logger.debug(f"Adding pending UI updates to graph state: {ui_updates}")
-
-    return updates_to_return
+    # Clean up the pending_ui_updates key from the graph state
+    update_dict = {"pending_ui_updates": None}
+    if app_state_updated:
+        logger.info("Streamlit app state updated.")
+    else:
+        logger.info("No Streamlit app state updates were applied in this step.")
+    logger.debug(f"Clearing intermediate graph state keys: {list(update_dict.keys())}")
+    return update_dict
 
 # --- Graph Condition Functions ---
 
@@ -362,68 +311,49 @@ def route_after_agent(state: AgentState) -> Literal["prepare_tool_run", END]:
     """Checks the last message for tool calls to decide the next step."""
     logger.debug("Router: route_after_agent executing...")
     messages = state.get("messages", [])
-    if not messages: return END
+    if not messages: logger.debug("Routing decision: END (no messages)"); return END
     last_message = messages[-1]
-    if isinstance(last_message, AIMessage) and getattr(last_message, 'tool_calls', None) and last_message.tool_calls:
-        logger.debug("Routing decision: prepare_tool_run (tool calls found)")
-        return "prepare_tool_run"
-    logger.debug(f"Routing decision: END (last msg type: {type(last_message).__name__}, tool_calls: {bool(getattr(last_message, 'tool_calls', None))})")
-    return END
+    logger.debug(f"Last message for routing: Type={type(last_message).__name__}, ToolCalls={getattr(last_message, 'tool_calls', 'N/A')}")
+    has_tool_calls = False
+    if isinstance(last_message, AIMessage):
+        tool_calls = getattr(last_message, 'tool_calls', None)
+        if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+            first_call = tool_calls[0]
+            if isinstance(first_call, dict): has_tool_calls = bool(first_call.get("name") and first_call.get("id"))
+            elif hasattr(first_call, 'name') and hasattr(first_call, 'id'): has_tool_calls = True
+    if has_tool_calls: logger.debug("Routing decision: prepare_tool_run"); return "prepare_tool_run"
+    else: logger.debug("Routing decision: END"); return END
 
-def route_after_tool_prep(state: AgentState) -> Literal["execute_tool_and_update", "agent"]:
+def route_after_tool_prep(state: AgentState) -> Literal["execute_tool", "agent"]:
     """Checks if a tool invocation request is pending."""
     logger.debug("Router: route_after_tool_prep executing...")
-    if state.get("tool_invocation_request"):
-         logger.debug("Routing decision: execute_tool_and_update (request pending)")
-         return "execute_tool_and_update"
-    else:
-         logger.debug("Routing decision: agent (no tool request pending)")
-         return "agent"
+    pending_request = state.get("tool_invocation_request")
+    logger.debug(f"Tool invocation request in state: {pending_request}")
+    if pending_request and isinstance(pending_request, dict) and pending_request.get("tool_call_id"):
+         logger.debug("Routing decision: execute_tool"); return "execute_tool"
+    else: logger.debug("Routing decision: agent"); return "agent"
 
 # --- Graph Construction ---
 def build_graph():
     """Constructs and compiles the LangGraph agent workflow."""
-    if not _DEPENDENCIES_LOADED:
-         logger.critical("Cannot build graph, dependencies failed.")
-         return None
-
+    if not _DEPENDENCIES_LOADED: logger.critical("Cannot build graph - dependencies failed."); return None
     logger.info("Building LangGraph workflow...")
-    workflow = StateGraph(AgentState) # Use the AgentState TypedDict
+    workflow = StateGraph(AgentState)
 
-    # Add nodes
+    # Add Nodes
     workflow.add_node("agent", call_agent)
     workflow.add_node("prepare_tool_run", prepare_tool_run)
-    workflow.add_node("execute_tool_and_update", execute_tool_and_update)
+    workflow.add_node("execute_tool", execute_tool)         # Executes tool via _execute_impl
+    workflow.add_node("update_app_state", update_app_state) # Applies only UI updates
 
-    # Define entry point
+    # Define Edges
     workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges("agent", route_after_agent, {"prepare_tool_run": "prepare_tool_run", END: END})
+    workflow.add_conditional_edges("prepare_tool_run", route_after_tool_prep, {"execute_tool": "execute_tool", "agent": "agent"})
+    workflow.add_edge("execute_tool", "update_app_state") # Always update state after execution
+    workflow.add_edge("update_app_state", "agent")        # Always go back to agent after state update
 
-    # Define conditional edges from 'agent'
-    workflow.add_conditional_edges(
-        "agent",
-        route_after_agent,
-        {
-            "prepare_tool_run": "prepare_tool_run",
-            END: END # If no tool calls, end the execution
-        }
-    )
-    # Define conditional edges from 'prepare_tool_run'
-    workflow.add_conditional_edges(
-         "prepare_tool_run",
-         route_after_tool_prep,
-         {
-              "execute_tool_and_update": "execute_tool_and_update", # If request prepared, execute
-              "agent": "agent" # If prep failed or no tool call, go back to agent
-         }
-    )
-
-    # Always return to the agent after executing a tool to process the result
-    workflow.add_edge("execute_tool_and_update", "agent")
-
-    # Configure memory for conversation history persistence
     memory = MemorySaver()
-
-    # Compile the graph with the checkpointer
     try:
         graph = workflow.compile(checkpointer=memory)
         logger.info("LangGraph workflow compiled successfully.")
@@ -431,38 +361,70 @@ def build_graph():
     except Exception as e:
          message = f"Failed to compile LangGraph workflow: {e}"
          logger.critical(message, exc_info=True)
-         if _IN_STREAMLIT_CONTEXT:
-             try: st.error(message)
-             except Exception as streamlit_e: logger.warning(f"Failed to show St error: {streamlit_e}")
-         return None # Indicate compilation failure
+         if _IN_STREAMLIT_CONTEXT and _st_module:
+             try: _st_module.error(message)
+             except: pass
+         return None
 
 # --- Global Compiled Graph Instance ---
-# Build the graph when the module is loaded.
-# This makes it readily available for import in the Streamlit page.
 compiled_graph = build_graph()
+if compiled_graph: logger.info("Global 'compiled_graph' instance created successfully.")
+else: logger.error("Global 'compiled_graph' IS NONE due to build failure. AI Agent will be unavailable.")
 
-if compiled_graph:
-    logger.info("Global 'compiled_graph' instance created successfully.")
-else:
-    logger.error("Global 'compiled_graph' instance IS NONE due to build failure. Agent will be unavailable.")
-
-# --- Direct Execution Block (for basic testing) ---
+# --- Direct Execution Block ---
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG) # Ensure DEBUG level for direct testing
-    logger.info(f"--- Running {__file__} directly for testing ---")
+    if not logging.getLogger().hasHandlers():
+         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s [%(levelname)s] - %(message)s (%(filename)s:%(lineno)d)')
+    logger.info(f"--- Running {Path(__file__).name} directly for testing ---")
     if compiled_graph:
-        logger.info("Graph compiled successfully. Ready for testing (using mocks if core modules failed).")
-        # Example Test Invocation (uncomment to run)
-        # config = {"configurable": {"thread_id": "direct_test_thread_1"}}
-        # test_input = {"messages": [HumanMessage(content="Make the image 50 brighter")]}
-        # logger.info(f"Invoking graph with input: {test_input}")
-        # try:
-        #     for event in compiled_graph.stream(test_input, config, stream_mode="values"):
-        #         logger.info(f"Graph Event: {event}")
-        #     final_state = compiled_graph.get_state(config)
-        #     logger.info(f"Final State: {final_state}")
-        # except Exception as test_e:
-        #     logger.error(f"Graph invocation test failed: {test_e}", exc_info=True)
-    else:
-        logger.error("Graph compilation FAILED during module load. Cannot run tests.")
-    logger.info(f"--- Finished {__file__} direct test ---")
+        logger.info("Graph compiled. Structure:")
+        try: compiled_graph.get_graph().print_ascii()
+        except Exception as draw_e: logger.warning(f"Could not print graph structure: {draw_e}")
+
+        # --- Basic Invocation Test ---
+        logger.info("--- Running basic invocation test ---")
+        if not _IN_STREAMLIT_CONTEXT:
+            logger.info("Setting up mock Streamlit session state for testing.")
+            class MockSessionState(dict):
+                def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); self.__dict__ = self
+            mock_st = type('MockStreamlit', (), {'session_state': MockSessionState()})
+            mock_st.session_state['processed_image'] = Image.new("RGB", (100, 80), "orange") # Provide a mock image
+            mock_st.session_state['brightness_slider'] = 0 # Add keys expected by UI updates
+            mock_st.session_state['contrast_slider'] = 1.0
+            mock_st.session_state['rotation_slider'] = 0
+            mock_st.session_state['binarize_thresh_slider'] = 128
+            mock_st.session_state['apply_binarization_cb'] = False
+            mock_st.session_state['zoom_x'] = 0
+            mock_st.session_state['zoom_y'] = 0
+            mock_st.session_state['zoom_w'] = 100
+            mock_st.session_state['zoom_h'] = 100
+
+            # Make mock available to imported modules if needed
+            if 'state.session_state_manager' in sys.modules: sys.modules['state.session_state_manager'].st = mock_st
+            if 'agent.tools' in sys.modules: sys.modules['agent.tools']._st_module = mock_st; sys.modules['agent.tools']._IN_STREAMLIT_CONTEXT_TOOLS = True
+            _st_module = mock_st
+            _IN_STREAMLIT_CONTEXT = True
+
+        config = {"configurable": {"thread_id": "direct_test_thread_final"}}
+        test_input = {"messages": [HumanMessage(content="Make the image much brighter, say factor 50")]}
+        # test_input = {"messages": [HumanMessage(content="What is the image size?")]}
+        # test_input = {"messages": [HumanMessage(content="Hello!")]}
+
+        try:
+             logger.info(f"Invoking graph with input: {test_input}")
+             final_state = None
+             for step in compiled_graph.stream(test_input, config):
+                 step_key = list(step.keys())[0]; step_value = step[step_key]
+                 logger.info(f"--- Graph Step: {step_key} ---")
+                 logger.info(f"  Full Step Output: {step_value}")
+                 final_state = step_value
+             logger.info(f"--- Test Invocation Final State ---")
+             if final_state: logger.info(f"  Final State: {final_state}")
+             else: logger.info("  No final state captured.")
+             if _IN_STREAMLIT_CONTEXT and _st_module:
+                 logger.info("--- Mock Streamlit State After Run ---")
+                 logger.info(f"  st.session_state: {_st_module.session_state}")
+
+        except Exception as test_e: logger.error(f"Graph invocation test failed: {test_e}", exc_info=True)
+    else: logger.error("Graph compilation FAILED. Cannot run tests.")
+    logger.info(f"--- Finished {Path(__file__).name} direct test ---")
