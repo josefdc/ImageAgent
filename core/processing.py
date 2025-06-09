@@ -1,15 +1,32 @@
-# image_editor/core/processing.py
-import streamlit as st # Keep for feedback messages
+"""
+Image processing operations module.
+
+This module provides a comprehensive set of image processing functions including
+basic adjustments (brightness, contrast, rotation), advanced operations (zoom,
+binarization, negative), channel manipulation, highlighting, and image merging
+with proper error handling for Streamlit applications.
+"""
+
+import streamlit as st
 from PIL import Image, ImageEnhance, ImageOps
 import numpy as np
 from typing import Optional, List
 from utils.constants import HIGHLIGHT_GRAY_COLOR, DEFAULT_CHANNELS
 
-# --- Basic Adjustments ---
 
 def apply_brightness(image: Optional[Image.Image], factor: int) -> Optional[Image.Image]:
-    """Applies brightness adjustment."""
-    if image is None: return None
+    """
+    Apply brightness adjustment to an image.
+    
+    Args:
+        image: PIL Image object to adjust
+        factor: Brightness factor as integer percentage (-100 to 100)
+        
+    Returns:
+        Brightness-adjusted image, or original image if operation fails
+    """
+    if image is None:
+        return None
     try:
         enhancer = ImageEnhance.Brightness(image)
         mapped_factor = 1.0 + (factor / 100.0)
@@ -18,9 +35,20 @@ def apply_brightness(image: Optional[Image.Image], factor: int) -> Optional[Imag
         st.warning(f"Could not apply brightness: {e}")
         return image
 
+
 def apply_contrast(image: Optional[Image.Image], factor: float) -> Optional[Image.Image]:
-    """Applies contrast adjustment."""
-    if image is None: return None
+    """
+    Apply contrast adjustment to an image.
+    
+    Args:
+        image: PIL Image object to adjust
+        factor: Contrast enhancement factor
+        
+    Returns:
+        Contrast-adjusted image, or original image if operation fails
+    """
+    if image is None:
+        return None
     try:
         enhancer = ImageEnhance.Contrast(image)
         return enhancer.enhance(factor)
@@ -28,20 +56,44 @@ def apply_contrast(image: Optional[Image.Image], factor: float) -> Optional[Imag
         st.warning(f"Could not apply contrast: {e}")
         return image
 
+
 def apply_rotation(image: Optional[Image.Image], angle: int) -> Optional[Image.Image]:
-    """Rotates the image, expanding the canvas."""
-    if image is None or angle % 360 == 0: return image # No-op if no rotation
+    """
+    Rotate an image by specified angle with canvas expansion.
+    
+    Args:
+        image: PIL Image object to rotate
+        angle: Rotation angle in degrees
+        
+    Returns:
+        Rotated image with expanded canvas, or original image if operation fails
+    """
+    if image is None or angle % 360 == 0:
+        return image
     try:
-        return image.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC) # Use BICUBIC for better quality
+        return image.rotate(angle, expand=True, fillcolor='white', resample=Image.Resampling.BICUBIC)
     except Exception as e:
         st.warning(f"Could not apply rotation: {e}")
         return image
 
-# --- Advanced Operations ---
 
-def apply_zoom(image: Optional[Image.Image], x_perc: int, y_perc: int, w_perc: int, h_perc: int) -> Optional[Image.Image]:
-    """Crops the image based on percentage coordinates."""
-    if image is None: return None
+def apply_zoom(image: Optional[Image.Image], x_perc: int, y_perc: int, 
+               w_perc: int, h_perc: int) -> Optional[Image.Image]:
+    """
+    Crop image based on percentage coordinates (zoom operation).
+    
+    Args:
+        image: PIL Image object to crop
+        x_perc: X position as percentage (0-100)
+        y_perc: Y position as percentage (0-100)
+        w_perc: Width as percentage (0-100)
+        h_perc: Height as percentage (0-100)
+        
+    Returns:
+        Cropped image, or original image if operation fails or dimensions are invalid
+    """
+    if image is None:
+        return None
     try:
         width, height = image.size
         left = int(width * (x_perc / 100.0))
@@ -54,42 +106,72 @@ def apply_zoom(image: Optional[Image.Image], x_perc: int, y_perc: int, w_perc: i
 
         if right <= left or bottom <= top:
             st.warning("Invalid zoom dimensions. Width and Height must result in a positive area.")
-            return image # Return original if dimensions are invalid
+            return image
         return image.crop((left, top, right, bottom))
     except Exception as e:
         st.warning(f"Could not apply zoom: {e}")
         return image
 
+
 def apply_binarization(image: Optional[Image.Image], threshold: int) -> Optional[Image.Image]:
-    """Applies binarization using a threshold."""
-    if image is None: return None
+    """
+    Apply binary threshold to convert image to black and white.
+    
+    Args:
+        image: PIL Image object to binarize
+        threshold: Threshold value (0-255) for binarization
+        
+    Returns:
+        Binarized image in RGB format, or original image if operation fails
+    """
+    if image is None:
+        return None
     try:
-        img_gray = image.convert('L') # Convert to grayscale first
-        # Apply threshold: pixels > threshold become white (255), others black (0)
-        img_bin = img_gray.point(lambda p: 255 if p > threshold else 0, mode='1') # Use mode '1' for efficiency
-        return img_bin.convert('RGB') # Convert back to RGB for display consistency
+        img_gray = image.convert('L')
+        img_bin = img_gray.point(lambda p: 255 if p > threshold else 0, mode='1')
+        return img_bin.convert('RGB')
     except Exception as e:
         st.warning(f"Could not apply binarization: {e}")
         return image
 
+
 def apply_negative(image: Optional[Image.Image]) -> Optional[Image.Image]:
-    """Inverts the colors of the image."""
-    if image is None: return None
+    """
+    Invert the colors of an image to create a negative effect.
+    
+    Args:
+        image: PIL Image object to invert
+        
+    Returns:
+        Color-inverted image, or original image if operation fails
+    """
+    if image is None:
+        return None
     try:
-        # Ensure image is RGB before inverting for predictable results
         return ImageOps.invert(image.convert('RGB'))
     except Exception as e:
         st.warning(f"Could not apply negative: {e}")
         return image
 
-def apply_channel_manipulation(image: Optional[Image.Image], selected_channels: List[str]) -> Optional[Image.Image]:
-    """Keeps selected RGB channels, setting others to 0."""
+
+def apply_channel_manipulation(image: Optional[Image.Image], 
+                             selected_channels: List[str]) -> Optional[Image.Image]:
+    """
+    Manipulate RGB channels by keeping selected ones and zeroing others.
+    
+    Args:
+        image: PIL Image object to process
+        selected_channels: List of channel names to keep ('Red', 'Green', 'Blue')
+        
+    Returns:
+        Channel-manipulated image, or original image if operation fails
+    """
     if image is None or set(selected_channels) == set(DEFAULT_CHANNELS):
-        return image # No-op if all channels selected
+        return image
     try:
         r, g, b = image.split()
         size = image.size
-        zero_channel = Image.new('L', size, 0) # Efficiently create a black channel
+        zero_channel = Image.new('L', size, 0)
 
         r_channel = r if 'Red' in selected_channels else zero_channel
         g_channel = g if 'Green' in selected_channels else zero_channel
@@ -100,22 +182,34 @@ def apply_channel_manipulation(image: Optional[Image.Image], selected_channels: 
         st.warning(f"Could not apply channel manipulation: {e}")
         return image
 
+
 def apply_highlight(image: Optional[Image.Image], mode: str, threshold: int) -> Optional[Image.Image]:
-    """Highlights light or dark areas by graying out the rest."""
-    if image is None or mode == "None": return image
+    """
+    Highlight light or dark areas by applying gray overlay to non-selected regions.
+    
+    Args:
+        image: PIL Image object to process
+        mode: Highlight mode ('Highlight Light Areas', 'Highlight Dark Areas', or 'None')
+        threshold: Threshold value (0-255) for area selection
+        
+    Returns:
+        Highlighted image, or original image if operation fails
+    """
+    if image is None or mode == "None":
+        return image
     try:
         img_gray = image.convert('L')
-        img_np = np.array(image).copy() # Work on numpy array for masking
+        img_np = np.array(image).copy()
         mask = None
+        
         if mode == "Highlight Light Areas":
-            mask = np.array(img_gray) <= threshold # Mask areas *not* highlighted (darker/equal)
+            mask = np.array(img_gray) <= threshold
         elif mode == "Highlight Dark Areas":
-            mask = np.array(img_gray) >= threshold # Mask areas *not* highlighted (lighter/equal)
+            mask = np.array(img_gray) >= threshold
         else:
-             return image # Should not happen with 'None' check above but good failsafe
+            return image
 
         if mask is not None:
-            # Apply a neutral gray overlay to masked areas
             img_np[mask] = HIGHLIGHT_GRAY_COLOR
 
         return Image.fromarray(img_np)
@@ -123,28 +217,37 @@ def apply_highlight(image: Optional[Image.Image], mode: str, threshold: int) -> 
         st.warning(f"Could not apply highlight: {e}")
         return image
 
-# --- Merging ---
 
-def merge_images(image1: Optional[Image.Image], image2: Optional[Image.Image], alpha: float) -> Optional[Image.Image]:
-    """Merges two images using alpha blending, resizing the second if needed."""
+def merge_images(image1: Optional[Image.Image], image2: Optional[Image.Image], 
+                alpha: float) -> Optional[Image.Image]:
+    """
+    Merge two images using alpha blending with automatic resizing.
+    
+    Args:
+        image1: Primary PIL Image object
+        image2: Secondary PIL Image object to blend
+        alpha: Blending factor (0.0 to 1.0)
+        
+    Returns:
+        Merged image in RGB format, or primary image if operation fails
+        
+    Note:
+        The second image is automatically resized to match the first image's dimensions.
+    """
     if image1 is None or image2 is None:
         st.warning("Both images must be loaded to merge.")
-        return image1 or image2 # Return whichever is available
+        return image1 or image2
 
     try:
-        # Resize second image to match the first if necessary
         if image1.size != image2.size:
             st.info(f"Resizing second image from {image2.size} to {image1.size} for merging.")
-            # Use LANCZOS for high-quality downscaling/upscaling
             image2 = image2.resize(image1.size, Image.Resampling.LANCZOS)
 
-        # Ensure RGBA for alpha blending
         image1_rgba = image1.convert("RGBA")
         image2_rgba = image2.convert("RGBA")
 
-        # Blend images
         blended = Image.blend(image1_rgba, image2_rgba, alpha=alpha)
-        return blended.convert("RGB") # Convert back to RGB for consistency
+        return blended.convert("RGB")
     except Exception as e:
         st.error(f"Error merging images: {e}")
-        return image1 # Return primary image on error
+        return image1

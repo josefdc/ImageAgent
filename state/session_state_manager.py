@@ -1,31 +1,43 @@
-# streamlit_image_editor/state/session_state_manager.py
-import streamlit as st
-from typing import Dict, Any, List, Optional # Added Optional
-from PIL import Image # Import Image for type checking
-import logging # Import logging
-import os # Import os for environment variable access
+"""
+Session State Manager for Streamlit Image Editor
 
-# --- Constants Import ---
-# Ensure constants are accessible if needed, assuming utils/constants.py exists
+This module provides centralized management of Streamlit session state for the image editor application.
+It handles initialization, updates, and resets of all application state including:
+
+- Image data (original, processed, secondary images)
+- UI widget states (sliders, checkboxes, selections)
+- Processing flags and triggers
+- Chat history for AI assistant
+- Image processing parameters
+
+The module ensures consistent state management across all pages and components of the application,
+providing safe operations for updating image data and maintaining state integrity.
+"""
+
+import streamlit as st
+import logging
+import os
+from typing import Dict, Any, List, Optional
+from PIL import Image
+
 try:
     from utils.constants import DEFAULT_CHANNELS
 except ImportError:
-    DEFAULT_CHANNELS = ['Red', 'Green', 'Blue'] # Fallback
+    DEFAULT_CHANNELS = ['Red', 'Green', 'Blue']
 
-# --- Logger Setup ---
-# Set up logger for this module specifically
 logger = logging.getLogger(__name__)
-# Ensure basicConfig is called, potentially redundant but safe
 if not logging.getLogger().hasHandlers():
-     _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-     logging.basicConfig(level=_log_level, format='%(asctime)s - %(name)s [%(levelname)s] - %(message)s')
+    _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(level=_log_level, format='%(asctime)s - %(name)s [%(levelname)s] - %(message)s')
 
-
-# --- Existing Functions (get_default_session_values, initialize_session_state, etc.) ---
-# (Keep the rest of the file as it was, including imports at the top)
 
 def get_default_session_values() -> Dict[str, Any]:
-    # ... (implementation as before) ...
+    """
+    Get default values for all session state variables.
+    
+    Returns:
+        Dictionary containing default values for session state initialization
+    """
     return {
         'original_image': None,
         'processed_image': None,
@@ -53,79 +65,114 @@ def get_default_session_values() -> Dict[str, Any]:
         'current_graph_thread_id': "default_thread_1"
     }
 
-def initialize_session_state():
-    # ... (implementation as before) ...
+
+def initialize_session_state() -> None:
+    """
+    Initialize session state with default values for any missing keys.
+    
+    Safely initializes all required session state variables without overwriting
+    existing values. Lists and dictionaries are properly copied to avoid reference issues.
+    """
     defaults = get_default_session_values()
     for key, value in defaults.items():
         if key not in st.session_state:
-            if isinstance(value, list): st.session_state[key] = value.copy()
-            elif isinstance(value, dict): st.session_state[key] = value.copy()
-            else: st.session_state[key] = value
+            if isinstance(value, list):
+                st.session_state[key] = value.copy()
+            elif isinstance(value, dict):
+                st.session_state[key] = value.copy()
+            else:
+                st.session_state[key] = value
 
-def reset_triggered_flags():
-    # ... (implementation as before) ...
+
+def reset_triggered_flags() -> None:
+    """
+    Reset all trigger flags to False.
+    
+    Used to clear processing flags after operations complete
+    to prevent repeated execution.
+    """
     st.session_state.apply_zoom_triggered = False
-    # ... etc ...
+    st.session_state.apply_negative_triggered = False
+    st.session_state.apply_merge_triggered = False
+    st.session_state.ai_remove_bg_triggered = False
     st.session_state.ai_upscale_triggered = False
 
-def reset_all_state(keep_chat_history: bool = False):
-    # ... (implementation as before) ...
+
+def reset_all_state(keep_chat_history: bool = False) -> None:
+    """
+    Reset all session state to default values.
+    
+    Args:
+        keep_chat_history: If True, preserves chat history during reset
+    """
     defaults = get_default_session_values()
-    # ... reset images ...
+    
     st.session_state.original_image = st.session_state.get('original_image', None)
     st.session_state.processed_image = st.session_state.original_image.copy() if st.session_state.original_image else None
-    # ... etc ...
-    if not keep_chat_history: st.session_state.chat_history = []
-    # ... reset widgets ...
+    
+    for key, value in defaults.items():
+        if key not in ['original_image', 'processed_image']:
+            if key == 'chat_history' and keep_chat_history:
+                continue
+            if isinstance(value, list):
+                st.session_state[key] = value.copy()
+            elif isinstance(value, dict):
+                st.session_state[key] = value.copy()
+            else:
+                st.session_state[key] = value
+    
     reset_triggered_flags()
     st.success("Editor State Reset!")
 
 
-# --- CORRECTED update_processed_image ---
 def update_processed_image(new_image: Optional[Image.Image]) -> bool:
     """
-    Safely updates the 'processed_image' and 'last_processed_image_state'
-    in Streamlit's session state.
-
+    Safely update the processed image in session state.
+    
+    Stores the current processed image as backup before updating to the new image.
+    Provides error handling and logging for safe state management.
+    
     Args:
-        new_image: The new PIL Image object to set as processed_image.
-
+        new_image: New PIL Image object to set as processed image
+        
     Returns:
-        True if the state was successfully updated, False otherwise.
+        True if update was successful, False otherwise
     """
     if new_image is not None and isinstance(new_image, Image.Image):
         try:
-            # Store the *current* processed image as the last state *before* overwriting
             if 'processed_image' in st.session_state and isinstance(st.session_state.processed_image, Image.Image):
                 st.session_state.last_processed_image_state = st.session_state.processed_image.copy()
             else:
-                # If there was no previous valid processed image, clear the last state
                 st.session_state.last_processed_image_state = None
 
-            # Update the processed image state
             st.session_state.processed_image = new_image
             logger.info("Session state 'processed_image' updated successfully.")
-            return True # Indicate success
+            return True
         except Exception as e:
-             # Catch potential errors during copy or assignment (though unlikely)
-             logger.error(f"Failed to update session state for processed image: {e}", exc_info=True)
-             # Show error in UI if possible
-             try: st.error("Internal error: Failed to save the processed image state.")
-             except: pass # Ignore errors if streamlit isn't fully available
-             return False # Indicate failure
+            logger.error(f"Failed to update session state for processed image: {e}", exc_info=True)
+            try:
+                st.error("Internal error: Failed to save the processed image state.")
+            except:
+                pass
+            return False
     else:
-        # Log error if input is invalid
         logger.error(f"update_processed_image called with invalid input (Type: {type(new_image)}). State not updated.")
-        # Optionally show an error in the UI
-        try: st.error("Internal error: Attempted to update image with invalid data.")
-        except: pass
-        return False # Indicate failure
+        try:
+            st.error("Internal error: Attempted to update image with invalid data.")
+        except:
+            pass
+        return False
 
 
-def revert_processed_image():
-    # ... (implementation as before) ...
+def revert_processed_image() -> None:
+    """
+    Revert processed image to previous state.
+    
+    Restores the processed image from the last saved state, or falls back
+    to the original image if no previous state exists.
+    """
     if st.session_state.get('last_processed_image_state') is not None:
         st.session_state.processed_image = st.session_state.last_processed_image_state
     elif st.session_state.get('original_image') is not None:
         st.session_state.processed_image = st.session_state.original_image.copy()
-    logger.info("Reverted processed image to previous state.") # Add log
+    logger.info("Reverted processed image to previous state.")
