@@ -70,8 +70,8 @@
 1.  **Clone the Repository:**
     ```bash
     # Replace with your actual repository URL
-    git clone https://github.com/yourusername/image-editor.git
-    cd image-editor
+    git clone https://github.com/josefdc/ImageAgent.git
+    cd ImageAgent
     ```
 2.  **Create and Activate Virtual Environment** (Recommended):
     ```bash
@@ -204,4 +204,4 @@ image-editor/
 - [OpenAI](https://openai.com/) (or other LLM/TTS providers)
 
 ---
-Made with ❤️ by @josefdc @Esteban8482
+Made with ❤️ by @josefdc
